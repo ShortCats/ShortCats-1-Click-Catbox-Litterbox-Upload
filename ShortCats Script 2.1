@@ -1,0 +1,324 @@
+#!/bin/bash
+
+#| by u/alexbarbershop, more info @ ❤️
+#|sites.google.com/view/shortcats ⬅︎ ⬇︎ ←  
+#|Donate: PayPal.com/donate/?hosted_button_id=K8VC9LKWFDV6U 
+#|or to BTC/XMR/ETH/LTC addresses after script+on my site ↖︎ 
+#| Not affiliated w/ Catbox LLC|#
+#|but you can support free hos-|#
+#|ting @ catbox.moe/support.php|# 
+#| Uses some OS code written by|# 
+#|Bartłomiej Skoczeń & released|#
+#| on git:MineBartekSA/catbox |#
+#|with an MIT free use license|#
+#|My code is released similar-|#
+#|ly with a CC0 Creative Comm-|#
+#|unist license, credit apprecia-|#
+#|ted|clots_slipped.5s@icloud.com|#
+
+# --- Configuration --- #
+input_file_path="Shortcut Input (File Path)" # Example path
+log_file="/tmp/icloud_litterbox_script.log"
+upload_type="Upload Type"
+
+# --- Catbox upload function (using temporary file copy with simplified name and ditto retry) --- #
+upload_from_local_copy() {
+    local source_file_path="$1" # This path *must* point to a fully local, readable file
+    local upload_type="$2"
+
+    # Verify the source file is actually readable before proceeding
+    if [[ ! -f "$source_file_path" ]]; then
+        echo "Error: Upload function received a non-existent file path: '$source_file_path'" >> "$log_file"
+        return 1
+    fi
+    if [[ ! -r "$source_file_path" ]]; then
+        echo "Error: Upload function received a non-readable file path: '$source_file_path'" >> "$log_file"
+        echo "Attempting to add read permission to file: '$source_file_path'" >> "$log_file"
+        chmod +r "$source_file_path" 2>/dev/null
+        if [[ ! -r "$source_file_path" ]]; then
+            echo "Error: Still unable to read file after attempting chmod: '$source_file_path'" >> "$log_file"
+            return 1
+        else
+            echo "Successfully added read permission to file: '$source_file_path'" >> "$log_file"
+        fi
+    fi
+
+    # Simplify the filename for the temporary copy and for the 'filename=' part of curl
+    local original_basename=$(basename "$source_file_path")
+    local file_extension="${original_basename##*.}"
+    local base_name_without_ext="${original_basename%.*}"
+
+    # Remove problematic characters and replace with underscores
+    local simplified_basename=$(echo "$base_name_without_ext" | sed -E 's/[^a-zA-Z0-9._-]/_/g' | sed -E 's/_+/_/g' | sed -E 's/^_//;s/_$//')
+    if [ -z "$simplified_basename" ]; then
+        simplified_basename="uploaded_file"
+    fi
+    local upload_filename="${simplified_basename}.${file_extension}"
+
+    # Create a temporary file with the simplified name in /tmp/
+    local temp_file_path=$(mktemp "/tmp/${simplified_basename}_XXXXXX.${file_extension}")
+    
+    # --- Retry loop for ditto command ---
+    local max_ditto_retries=5  # Increased retries for ditto
+    local current_ditto_retry=0
+    local ditto_success=false
+
+    while [ "$current_ditto_retry" -lt "$max_ditto_retries" ]; do
+        current_ditto_retry=$((current_ditto_retry + 1))
+        echo "Attempting ditto copy (retry $current_ditto_retry/$max_ditto_retries) from '$source_file_path' to '$temp_file_path'" >> "$log_file"
+        /usr/bin/ditto "$source_file_path" "$temp_file_path"
+        local ditto_exit_code=$?
+
+        if [ "$ditto_exit_code" -eq 0 ]; then
+            echo "File copied successfully to temporary path: '$temp_file_path'" >> "$log_file"
+            ditto_success=true
+            break # Exit retry loop on success
+        else
+            echo "Error: Failed to copy file to temporary location using ditto. ditto exit code: $ditto_exit_code" >> "$log_file"
+            if [ "$current_ditto_retry" -lt "$max_ditto_retries" ]; then
+                echo "Retrying ditto copy after a short delay (5 seconds)." >> "$log_file"
+                sleep 5
+            else
+                echo "Max ditto retries reached. Cannot proceed with upload." >> "$log_file"
+                rm -f "$temp_file_path" # Clean up temp file
+                return 1
+            fi
+        fi
+    done
+
+    if [ "$ditto_success" = false ]; then
+        # Should have returned already, but as a safeguard
+        echo "Error: ditto command failed after all retries." >> "$log_file"
+        rm -f "$temp_file_path" # Clean up temp file
+        return 1
+    fi
+
+    echo "Using simplified filename for upload: '$upload_filename'" >> "$log_file"
+
+    if [[ "$upload_type" == "temp" ]]; then
+        url="https://litterbox.catbox.moe/resources/internals/api.php"
+        form_args=( -F "reqtype=fileupload" -F "time=Litterbox Expiration" )
+    else
+        url="https://catbox.moe/user/api.php"
+        form_args=( -F "reqtype=fileupload" )
+    fi
+
+    # Use the temporary file path and the simplified filename for curl
+    curl_command="/usr/bin/curl -s ${form_args[@]} -F \"fileToUpload=@$temp_file_path;filename=$upload_filename\" \"$url\""
+    
+    echo "Executing curl command on temporary file: $curl_command" >> "$log_file"
+    local temp_output_file=$(mktemp)
+    eval "$curl_command" > "$temp_output_file" 2>&1
+    local curl_exit_code=$?
+    
+    output=$(cat "$temp_output_file")
+    rm "$temp_output_file"
+    rm -f "$temp_file_path" # Clean up the temporary file after upload attempt
+
+    if [ "$curl_exit_code" -ne 0 ]; then
+        echo "Curl command failed with exit code $curl_exit_code." >> "$log_file"
+        echo "Curl output (error detail): $output" >> "$log_file"
+    fi
+
+    echo "$output" 
+    return "$curl_exit_code"
+}
+
+# The rest of your script (the main logic) remains the same as before, 
+# including the longer brctl timeout and the brctl download retry logic.
+# The important part is that `upload_from_local_copy` now has its own ditto retry loop.
+
+echo "--- Starting iCloud Download and Catbox Upload Script ($(date)) ---" > "$log_file"
+echo "Input file path: $input_file_path" >> "$log_file"
+
+# Check if the original file path exists at all
+if ! test -f "$input_file_path"; then
+    echo "Error: File does not exist at $input_file_path." >> "$log_file"
+    exit 1
+fi
+
+final_upload_successful=false # Flag for overall success
+final_output=""
+final_catbox_exit_code=1
+local_file_for_upload="$input_file_path" # This will be the path used for the upload function
+brctl_exit_code=1 # Initialize brctl_exit_code outside the block so it's accessible
+
+# --- Attempt brctl download with retries and longer timeout ---
+max_brctl_retries=3 # Number of times to retry brctl download
+current_brctl_retry=0
+
+while [ "$current_brctl_retry" -lt "$max_brctl_retries" ]; do
+    current_brctl_retry=$((current_brctl_retry + 1))
+    echo "Attempting brctl download (retry $current_brctl_retry/$max_brctl_retries)..." >> "$log_file"
+    brctl_output=$(/usr/bin/brctl download "$input_file_path" 2>&1)
+    brctl_exit_code=$?
+
+    if [ "$brctl_exit_code" -eq 0 ]; then
+        echo "brctl download command issued successfully." >> "$log_file"
+        local max_wait=90 # Increased wait time to 90 seconds
+        local elapsed=0
+        local download_complete=false
+        while [ $elapsed -lt $max_wait ]; do
+            local size=$(get_file_size "$input_file_path")
+            # Check for both non-zero size AND absence of .icloud suffix
+            if [ "$size" -gt 0 ] && ! find "$input_file_path" -name "*.icloud" -maxdepth 0 -print -quit 2>/dev/null; then
+                echo "File appears downloaded (size=$size) and suffix removed." >> "$log_file"
+                download_complete=true
+                break
+            fi
+            sleep 2 # Check every 2 seconds
+            elapsed=$((elapsed + 2))
+            echo "Waiting for download: elapsed=${elapsed}s, size=${size}, icloud_suffix_present=$(find "$input_file_path" -name "*.icloud" -maxdepth 0 -print -quit 2>/dev/null && echo "YES" || echo "NO")" >> "$log_file"
+        done
+        
+        if [ "$download_complete" = true ]; then
+            echo "iCloud download completed successfully." >> "$log_file"
+            break # Exit retry loop as download is complete
+        else
+            echo "Warning: iCloud placeholder suffix still present after download attempts." >> "$log_file"
+            echo "Download did not complete within the timeout period for retry $current_brctl_retry." >> "$log_file"
+            # Allow next retry if available
+        fi
+    elif echo "$brctl_output" | grep -q "Error Domain=BRCloudDocsErrorDomain Code=6"; then
+        echo "brctl download failed, likely because path is outside iCloud managed area. ($brctl_output)" >> "$log_file"
+        echo "Assuming non-iCloud (local) file. Proceeding to upload attempt without retrying brctl." >> "$log_file"
+        # If it's not an iCloud file, there's no need to retry brctl
+        break 
+    else
+        echo "brctl download command failed with unexpected error on retry $current_brctl_retry. ($brctl_output)" >> "$log_file"
+        if [ "$current_brctl_retry" -eq "$max_brctl_retries" ]; then
+            echo "Max retries reached for brctl download. Cannot proceed with upload." >> "$log_file"
+            exit 1
+        else
+            echo "Retrying brctl download after a short delay." >> "$log_file"
+            sleep 5 # Wait before the next brctl retry
+        fi
+    fi
+done
+
+
+# Now that the iCloud file should be local (or determined to be a non-iCloud file), attempt the upload
+echo "Attempting upload from (now local) file." >> "$log_file"
+final_output=$(upload_from_local_copy "$local_file_for_upload" "$upload_type")
+final_catbox_exit_code=$?
+if [ "$final_catbox_exit_code" -eq 0 ]; then
+    final_upload_successful=true
+fi
+
+
+# Handling output and final status
+if [ "$final_upload_successful" = true ]; then
+    echo "--- Raw Catbox Output (Final Result) ---" >> "$log_file"
+    echo "$final_output" >> "$log_file"
+    echo "-------------------------------------------" >> "$log_file"
+    echo "Catbox-cli Exit Code (Final Result): $final_catbox_exit_code" >> "$log_file"
+
+    if [ "$final_catbox_exit_code" -eq 0 ]; then
+        url=$(echo "$final_output" | grep -Eo "https://[^ ]+\.catbox\.moe/[^ ]+" | tail -n 1)
+        if [ -n "$url" ]; then
+            echo "Successfully extracted URL: $url" >> "$log_file"
+            echo "$url" 
+        else
+            echo "Error: Could not extract URL from catbox-cli output. Output indicates success but no URL, or contained error." >> "$log_file"
+            echo "$final_output" 
+            exit 1
+        fi
+    else
+        echo "Error: Catbox upload failed with exit code $final_catbox_exit_code." >> "$log_file"
+        echo "$final_output" 
+        exit 1
+    fi
+else
+    echo "Overall script failed to upload file." >> "$log_file"
+    echo "$final_output" 
+    exit 1
+fi
+
+echo "--- End of Script ($(date)) ---" >> "$log_file"
+
+#| --- BEGIN FREEWARE PGP BEG SECTION ---
+
+#| by u/alexbarbershop, more info @
+#| sites.google.com/view/shortcats
+#|Donate: PayPal.com/donate/?hosted_button_id=K8VC9LKWFDV6U 
+#|or;
+
+#|  A few Satoshis to make me feel better about the 
+#|37 I had when they cost less than a McDouble does. 
+#| BTC:  bc1qajz4zcarstnzm5sh5c70e43l9zd49ug45yr3g3
+
+#|"more depraved than a man in the Depps of an ether Binge" 
+#| ETH:  0xCEdF024875457c660b1eBC5f0af86Ae227164855
+
+#| XMR Robot: 48qMQo4aUoH1XmaNSCowmo35c4qpUm5Jp9uN1BFQccB5dDUBD1P5txiK5fWn8U5q7HD37iwY9d1Dn9T5NuZWV2nrFGWPudb
+
+#| DOGE: RIP nostalgic memecoin, ded by eLoN TrUcC
+#| Lost 1000 of these in the 2013 Doge Vault hack, 
+#| back before the innocence had been lost.  
+#| It was a beautiful thing, once, before D.O.G.E.
+
+#| But you can help me keep the LITes cOiN (: 
+#| LTC:  ltc1q5xavwp3p4m2kwewvawupzjh93f5taccxlavjm0
+
+
+#| --- END PGP BEG --- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#nothingtoseeherefolks
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#☭SUBVERSIVE☭HIDDEN☭☭☭☭☭U
+#☭#☭#☭##☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭N
+#☭#☭#☭##☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭I
+#☭#☭#☭##☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭C
+#☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭O
+#☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭D
+#☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭E
+#☭COMMUNIST☭TEXT☭BLOC☭☭☭
+ 
