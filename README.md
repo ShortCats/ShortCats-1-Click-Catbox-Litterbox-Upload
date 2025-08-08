@@ -2,7 +2,7 @@
 shared shell script, but otherwise offering very different functionality to users. Both can be
 downloaded (via iCloud) free of charge at the [ShortCats Website](https://sites.google.com/view/shortcats).
 
-> ShortCats | 1-Click Catbox & Litterbox Upload >⁽²·⁰⁾< 
+> [ShortCats | 1-Click Catbox & Litterbox Upload >⁽²·⁰⁾< ](https://sites.google.com/view/shortcats)
 
   For more information, contact, the latest iCloud download links for both of my free ShortCats tools,
 or to donate exactly $3.50, visit my [ShortCats Website](https://sites.google.com/view/shortcats).
@@ -23,7 +23,7 @@ that I may not really need to create a second repository for the shell script us
 being developed simultaneously; 
 
 
-> ShortCats | 1-Click Reverse Image Searchˣ⁴  >⁽²·⁰⁾<
+> [ShortCats | 1-Click Reverse Image Searchˣ⁴  >⁽²·⁰⁾<](https://sites.google.com/view/shortcats)
 
 For more information, contact, the latest iCloud download links for both of my free ShortCats tools,
 or to donate exactly $3.50, visit my [ShortCats Website](https://sites.google.com/view/shortcats).
@@ -49,11 +49,11 @@ for potential sources of your image file in 4 new browser tabs, maximizing the p
 query, or all four of them at onece, which delivers the most consistent search results.  Currently,
 the ShortCat will also open the uploaded image file link so you may use the URL elsewhere as 
 necessary, and/or verify that it has vanished from the server after no more than one hour (the minimum
-expiration period avaiable with the litterbox API.
+expiration period avaiable with the Litterbox API.
 
   This tool may be especialy useful in OSINT, where rapid image tracing and other workflow optimization are
 crucial attributes of an effective operator.  Needless to say I hope a few of you kind spooks will donate 
-something around about $3.50 (or more, if it doesn't hurt) if you find either of my tools useful.
+something around about $3.50 (or more, if doing so does not cause pain) if you find either of my tools useful.
 
   This readme is fairly comprehensive, but direct contact info, download links & changelog can be found on my page;
   
