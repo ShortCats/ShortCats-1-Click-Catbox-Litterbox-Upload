@@ -21,12 +21,7 @@ input_file_path="Shortcut Input (File Path)" # Example path
 log_file="/tmp/icloud_litterbox_script.log"
 upload_type="Upload Type"
 
-# --- Function to get file size --- #
-get_file_size() {
-    stat -f%z "$1" 2>/dev/null || echo 0
-}
-
-# --- Catbox upload function (using temporary file copy with simplified name) --- #
+# --- Catbox upload function (using temporary file copy with simplified name and ditto retry) --- #
 upload_from_local_copy() {
     local source_file_path="$1" # This path *must* point to a fully local, readable file
     local upload_type="$2"
@@ -63,16 +58,41 @@ upload_from_local_copy() {
     # Create a temporary file with the simplified name in /tmp/
     local temp_file_path=$(mktemp "/tmp/${simplified_basename}_XXXXXX.${file_extension}")
     
-    echo "Copying local file '$source_file_path' to temporary file '$temp_file_path'" >> "$log_file"
-    /usr/bin/ditto "$source_file_path" "$temp_file_path"
-    local ditto_exit_code=$?
+    # --- Retry loop for ditto command ---
+    local max_ditto_retries=5  # Increased retries for ditto
+    local current_ditto_retry=0
+    local ditto_success=false
 
-    if [ "$ditto_exit_code" -ne 0 ]; then
-        echo "Error: Failed to copy file to temporary location using ditto. ditto exit code: $ditto_exit_code" >> "$log_file"
+    while [ "$current_ditto_retry" -lt "$max_ditto_retries" ]; do
+        current_ditto_retry=$((current_ditto_retry + 1))
+        echo "Attempting ditto copy (retry $current_ditto_retry/$max_ditto_retries) from '$source_file_path' to '$temp_file_path'" >> "$log_file"
+        /usr/bin/ditto "$source_file_path" "$temp_file_path"
+        local ditto_exit_code=$?
+
+        if [ "$ditto_exit_code" -eq 0 ]; then
+            echo "File copied successfully to temporary path: '$temp_file_path'" >> "$log_file"
+            ditto_success=true
+            break # Exit retry loop on success
+        else
+            echo "Error: Failed to copy file to temporary location using ditto. ditto exit code: $ditto_exit_code" >> "$log_file"
+            if [ "$current_ditto_retry" -lt "$max_ditto_retries" ]; then
+                echo "Retrying ditto copy after a short delay (5 seconds)." >> "$log_file"
+                sleep 5
+            else
+                echo "Max ditto retries reached. Cannot proceed with upload." >> "$log_file"
+                rm -f "$temp_file_path" # Clean up temp file
+                return 1
+            fi
+        fi
+    done
+
+    if [ "$ditto_success" = false ]; then
+        # Should have returned already, but as a safeguard
+        echo "Error: ditto command failed after all retries." >> "$log_file"
         rm -f "$temp_file_path" # Clean up temp file
         return 1
     fi
-    echo "File copied successfully to temporary path: '$temp_file_path'" >> "$log_file"
+
     echo "Using simplified filename for upload: '$upload_filename'" >> "$log_file"
 
     if [[ "$upload_type" == "temp" ]]; then
@@ -104,6 +124,10 @@ upload_from_local_copy() {
     return "$curl_exit_code"
 }
 
+# The rest of your script (the main logic) remains the same as before, 
+# including the longer brctl timeout and the brctl download retry logic.
+# The important part is that `upload_from_local_copy` now has its own ditto retry loop.
+
 echo "--- Starting iCloud Download and Catbox Upload Script ($(date)) ---" > "$log_file"
 echo "Input file path: $input_file_path" >> "$log_file"
 
@@ -119,54 +143,66 @@ final_catbox_exit_code=1
 local_file_for_upload="$input_file_path" # This will be the path used for the upload function
 brctl_exit_code=1 # Initialize brctl_exit_code outside the block so it's accessible
 
-# --- Attempt brctl download first, suppressing its output ---
-echo "Attempting brctl download (suppressing output)..." >> "$log_file"
-brctl_output=$(/usr/bin/brctl download "$input_file_path" 2>&1) # Capture stdout & stderr
-brctl_exit_code=$? # Capture exit code immediately after execution
+# --- Attempt brctl download with retries and longer timeout ---
+max_brctl_retries=3 # Number of times to retry brctl download
+current_brctl_retry=0
 
-# Check brctl exit code and captured output for specific error
-if [ "$brctl_exit_code" -eq 0 ]; then
-    echo "brctl download command issued successfully. Assuming iCloud file, waiting for completion..." >> "$log_file"
-    local max_wait=45 # Increased wait time for download and sync
-    local elapsed=0
-    while [ $elapsed -lt $max_wait ]; do
-        local size=$(get_file_size "$input_file_path")
-        if [ "$size" -gt 0 ] && ! find "$input_file_path" -name "*.icloud" -maxdepth 0 -print -quit 2>/dev/null; then
-            echo "File appears downloaded (size=$size) and suffix removed." >> "$log_file"
-            break
+while [ "$current_brctl_retry" -lt "$max_brctl_retries" ]; do
+    current_brctl_retry=$((current_brctl_retry + 1))
+    echo "Attempting brctl download (retry $current_brctl_retry/$max_brctl_retries)..." >> "$log_file"
+    brctl_output=$(/usr/bin/brctl download "$input_file_path" 2>&1)
+    brctl_exit_code=$?
+
+    if [ "$brctl_exit_code" -eq 0 ]; then
+        echo "brctl download command issued successfully." >> "$log_file"
+        local max_wait=90 # Increased wait time to 90 seconds
+        local elapsed=0
+        local download_complete=false
+        while [ $elapsed -lt $max_wait ]; do
+            local size=$(get_file_size "$input_file_path")
+            # Check for both non-zero size AND absence of .icloud suffix
+            if [ "$size" -gt 0 ] && ! find "$input_file_path" -name "*.icloud" -maxdepth 0 -print -quit 2>/dev/null; then
+                echo "File appears downloaded (size=$size) and suffix removed." >> "$log_file"
+                download_complete=true
+                break
+            fi
+            sleep 2 # Check every 2 seconds
+            elapsed=$((elapsed + 2))
+            echo "Waiting for download: elapsed=${elapsed}s, size=${size}, icloud_suffix_present=$(find "$input_file_path" -name "*.icloud" -maxdepth 0 -print -quit 2>/dev/null && echo "YES" || echo "NO")" >> "$log_file"
+        done
+        
+        if [ "$download_complete" = true ]; then
+            echo "iCloud download completed successfully." >> "$log_file"
+            break # Exit retry loop as download is complete
+        else
+            echo "Warning: iCloud placeholder suffix still present after download attempts." >> "$log_file"
+            echo "Download did not complete within the timeout period for retry $current_brctl_retry." >> "$log_file"
+            # Allow next retry if available
         fi
-        sleep 1
-        elapsed=$((elapsed + 1))
-    done
-    sleep 2 # Small final wait
-    
-    if find "$input_file_path" -name "*.icloud" -maxdepth 0 -print -quit 2>/dev/null; then
-        echo "Warning: iCloud placeholder suffix still present after download attempts." >> "$log_file"
-        echo "Continuing to upload attempt anyway, but may fail if not fully downloaded." >> "$log_file"
+    elif echo "$brctl_output" | grep -q "Error Domain=BRCloudDocsErrorDomain Code=6"; then
+        echo "brctl download failed, likely because path is outside iCloud managed area. ($brctl_output)" >> "$log_file"
+        echo "Assuming non-iCloud (local) file. Proceeding to upload attempt without retrying brctl." >> "$log_file"
+        # If it's not an iCloud file, there's no need to retry brctl
+        break 
     else
-        echo "iCloud placeholder suffix appears removed or was never present." >> "$log_file"
+        echo "brctl download command failed with unexpected error on retry $current_brctl_retry. ($brctl_output)" >> "$log_file"
+        if [ "$current_brctl_retry" -eq "$max_brctl_retries" ]; then
+            echo "Max retries reached for brctl download. Cannot proceed with upload." >> "$log_file"
+            exit 1
+        else
+            echo "Retrying brctl download after a short delay." >> "$log_file"
+            sleep 5 # Wait before the next brctl retry
+        fi
     fi
-    
-    # Now that the iCloud file should be local, attempt the upload
-    echo "Attempting upload from (now local) iCloud file." >> "$log_file"
-    final_output=$(upload_from_local_copy "$local_file_for_upload" "$upload_type")
-    final_catbox_exit_code=$?
-    if [ "$final_catbox_exit_code" -eq 0 ]; then
-        final_upload_successful=true
-    fi
-elif echo "$brctl_output" | grep -q "Error Domain=BRCloudDocsErrorDomain Code=6"; then
-    echo "brctl download failed, likely because path is outside iCloud managed area. ($brctl_output)" >> "$log_file"
-    echo "Assuming non-iCloud (local) file. Attempting direct upload." >> "$log_file"
-    # It's a non-iCloud file, attempt the upload directly
-    final_output=$(upload_from_local_copy "$local_file_for_upload" "$upload_type")
-    final_catbox_exit_code=$?
-    if [ "$final_catbox_exit_code" -eq 0 ]; then
-        final_upload_successful=true
-    fi
-else
-    echo "brctl download command failed with unexpected error. ($brctl_output)" >> "$log_file"
-    echo "Cannot proceed with upload." >> "$log_file"
-    # brctl failed for an unknown reason, assume unrecoverable and script will exit as failure
+done
+
+
+# Now that the iCloud file should be local (or determined to be a non-iCloud file), attempt the upload
+echo "Attempting upload from (now local) file." >> "$log_file"
+final_output=$(upload_from_local_copy "$local_file_for_upload" "$upload_type")
+final_catbox_exit_code=$?
+if [ "$final_catbox_exit_code" -eq 0 ]; then
+    final_upload_successful=true
 fi
 
 
@@ -285,3 +321,4 @@ echo "--- End of Script ($(date)) ---" >> "$log_file"
 #☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭D
 #☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭☭E
 #☭COMMUNIST☭TEXT☭BLOC☭☭☭
+ 
